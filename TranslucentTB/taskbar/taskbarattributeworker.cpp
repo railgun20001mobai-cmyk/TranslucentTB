@@ -343,6 +343,13 @@ LRESULT TaskbarAttributeWorker::MessageHandler(UINT uMsg, WPARAM wParam, LPARAM 
 	{
 		return OnPowerBroadcast(reinterpret_cast<const POWERBROADCAST_SETTING *>(lParam));
 	}
+	else if (uMsg == WM_TIMER && wParam == TASKBAR_TYPE_RETRY_TIMER_ID)
+	{
+		KillTimer(m_WindowHandle, TASKBAR_TYPE_RETRY_TIMER_ID);
+		MessagePrint(spdlog::level::debug, L"Retrying taskbar state initialization...");
+		ResetState();
+		return 0;
+	}
 	else if (uMsg == m_TaskbarCreatedMessage)
 	{
 		MessagePrint(spdlog::level::debug, L"Main taskbar got created, refreshing...");
@@ -1220,6 +1227,21 @@ TaskbarType TaskbarAttributeWorker::GetTaskbarType(Window taskbar)
 	}
 }
 
+void TaskbarAttributeWorker::ScheduleTaskbarTypeRetry()
+{
+	if (m_TaskbarTypeRetryCount >= TASKBAR_TYPE_MAX_RETRIES)
+	{
+		MessagePrint(spdlog::level::warn, L"Giving up waiting for the taskbar to be ready");
+		return;
+	}
+
+	++m_TaskbarTypeRetryCount;
+	if (!SetTimer(m_WindowHandle, TASKBAR_TYPE_RETRY_TIMER_ID, TASKBAR_TYPE_RETRY_INTERVAL, nullptr)) [[unlikely]]
+	{
+		LastErrorHandle(spdlog::level::warn, L"Failed to schedule a taskbar type retry");
+	}
+}
+
 TaskbarAttributeWorker::TaskbarAttributeWorker(ConfigManager &cfgManager, HINSTANCE hInstance, DynamicLoader &loader, const std::optional<std::filesystem::path> &storageFolder) :
 	MessageWindow(TTB_WORKERWINDOW, TTB_WORKERWINDOW, hInstance, WS_POPUP, WS_EX_NOREDIRECTIONBITMAP),
 	SetWindowCompositionAttribute(loader.SetWindowCompositionAttribute()),
@@ -1231,6 +1253,7 @@ TaskbarAttributeWorker::TaskbarAttributeWorker(ConfigManager &cfgManager, HINSTA
 	m_ResettingState(false),
 	m_ResetStateReentered(false),
 	m_TaskbarType(TaskbarType::Unknown),
+	m_TaskbarTypeRetryCount(0),
 	m_CurrentStartMonitor(nullptr),
 	m_CurrentSearchMonitor(nullptr),
 	m_CurrentFindInStartMonitor(nullptr),
@@ -1417,6 +1440,9 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 			m_ResetStateReentered = false;
 		});
 
+		// a reset cancels any pending retry; it will be rescheduled below if needed.
+		KillTimer(m_WindowHandle, TASKBAR_TYPE_RETRY_TIMER_ID);
+
 		// Clear state
 		m_PowerSaver = false;
 		m_PeekActive = false;
@@ -1435,10 +1461,13 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 		auto oldHooks = std::move(m_Hooks);
 		m_Hooks.clear();
 
+		bool foundMainTaskbar = false;
 		for (const Window main_taskbar : Window::FindEnum(TASKBAR))
 		{
 			if (main_taskbar.file().value_or({}).filename() == L"explorer.exe")
 			{
+				foundMainTaskbar = true;
+
 				const auto pid = main_taskbar.process_id();
 				if (!manual)
 				{
@@ -1458,6 +1487,10 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 				m_LastExplorerPid = pid;
 
 				m_TaskbarType = GetTaskbarType(main_taskbar);
+				if (m_TaskbarType != TaskbarType::Unknown)
+				{
+					m_TaskbarTypeRetryCount = 0;
+				}
 
 				if (m_TaskbarType == TaskbarType::XAML)
 				{
@@ -1466,6 +1499,13 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 					{
 						Localization::ShowLocalizedMessageBox(IDS_RESTART_REQUIRED, MB_OK | MB_ICONWARNING | MB_SETFOREGROUND, hinstance()).join();
 						ExitProcess(1);
+					}
+					else if (hr == HRESULT_FROM_WIN32(WAIT_TIMEOUT))
+					{
+						// Explorer wasn't ready in time. Stay alive and let a later taskbar notification
+						// reset our state instead of terminating the application.
+						MessagePrint(spdlog::level::warn, L"Timed out waiting for Explorer's taskbar appearance provider. Waiting...");
+						return;
 					}
 					else
 					{
@@ -1488,13 +1528,21 @@ void TaskbarAttributeWorker::ResetState(bool manual)
 				}
 				else
 				{
-					// unknown taskbar type - we might've detected explorer too early. do nothing for now. we should get a refresh later and be able to detect it.
+					// unknown taskbar type - we might've detected explorer too early. do nothing for now
+					// and retry shortly, in case the XAML island hasn't been created yet.
+					ScheduleTaskbarTypeRetry();
 					return;
 				}
 
 				InsertTaskbar(GetTaskbarMonitor(main_taskbar), main_taskbar);
 				break; // only one main taskbar.
 			}
+		}
+
+		if (!foundMainTaskbar)
+		{
+			// no taskbar yet (explorer may still be starting or restarting); check again later.
+			ScheduleTaskbarTypeRetry();
 		}
 
 		for (const Window secondtaskbar : Window::FindEnum(SECONDARY_TASKBAR))

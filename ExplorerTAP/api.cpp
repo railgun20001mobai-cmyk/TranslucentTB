@@ -54,6 +54,10 @@ HRESULT InjectExplorerTAP(HWND window, REFIID riid, LPVOID* ppv) try
 			return HRESULT_FROM_WIN32(GetLastError());
 		}
 
+		// Trigger WH_CALLWNDPROC without waiting for Explorer's UI thread, so that the
+		// payload gets loaded even if the thread's message queue is idle (e.g. at boot).
+		SendNotifyMessage(window, WM_NULL, 0, 0);
+
 		static constexpr DWORD READY_TIMEOUT =
 #ifdef _DEBUG
 			// do not timeout on debug builds, to allow debugging the DLL while it's loading in explorer
