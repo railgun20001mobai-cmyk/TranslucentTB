@@ -91,6 +91,7 @@ private:
 	HMONITOR m_CurrentFindInStartMonitor;
 	Window m_ForegroundWindow;
 	TaskbarType m_TaskbarType;
+	unsigned int m_TaskbarTypeRetryCount;
 	std::unordered_map<HMONITOR, MonitorInfo> m_Taskbars;
 	std::unordered_set<Window> m_NormalTaskbars;
 	ConfigManager &m_ConfigManager;
@@ -221,6 +222,11 @@ private:
 	static BOOL CALLBACK WindowEnumProc(HWND hwnd, LPARAM lParam);
 	static HMONITOR GetTaskbarMonitor(Window taskbar);
 	static TaskbarType GetTaskbarType(Window taskbar);
+	void ScheduleTaskbarTypeRetry();
+
+	static constexpr UINT_PTR TASKBAR_TYPE_RETRY_TIMER_ID = 0x54544231;
+	static constexpr UINT TASKBAR_TYPE_RETRY_INTERVAL = 1000;
+	static constexpr unsigned int TASKBAR_TYPE_MAX_RETRIES = 30;
 
 	inline TaskbarAppearance WithPreview(txmp::TaskbarState state, const TaskbarAppearance &appearance) const
 	{
